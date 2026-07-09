@@ -3,11 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main, feature/**]
 
 jobs:
   lint:
+    name: Code Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +22,8 @@ jobs:
         run: ruff check .
 
   test:
+    name: Unit Tests
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,3 +39,17 @@ jobs:
 
       - name: Run unit tests
         run: pytest tests/ -v
+
+  report:
+    name: Report Status
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ]; then
+            echo "CI 실패"
+            exit 1
+          fi
+          echo "CI 전체 통과"

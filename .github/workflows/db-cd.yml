@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'preprocessors/*_schema.sql'
+  workflow_dispatch:  # Actions 탭에서 수동으로 실행 가능 (머지 전 테스트용)
 
 jobs:
   migrate:
