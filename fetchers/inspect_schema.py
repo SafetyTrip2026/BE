@@ -47,7 +47,7 @@ def inspect(dataset_key: str):
     except requests.exceptions.RequestException as e:
         print(f"[ERROR] 요청 실패: {e}")
     except json.JSONDecodeError:
-        print(f"[ERROR] JSON 파싱 실패. 응답 원문(앞부분):")
+        print("[ERROR] JSON 파싱 실패. 응답 원문(앞부분):")
         print(resp.text[:1000])
 
 

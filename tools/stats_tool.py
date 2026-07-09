@@ -11,7 +11,7 @@ LangGraph의 stats 노드에서 호출할 함수.
 """
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

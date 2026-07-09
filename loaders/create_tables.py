@@ -43,7 +43,7 @@ def run():
             sql = f.read()
         try:
             cur.execute(sql)
-            print(f"  -> 성공")
+            print("  -> 성공")
         except Exception as e:
             print(f"  -> [ERROR] {e}")
 

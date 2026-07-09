@@ -42,8 +42,8 @@ def _probe_page_size(info: dict, requested_size: int) -> int:
         print(f"  -> 안전함. numOfRows={requested_size}로 진행합니다.")
         return requested_size
 
-    print(f"  -> [WARN] 요청보다 적게 옴 (잘림 위험, offset 밀려서 데이터 유실 가능).")
-    print(f"  -> 검증된 안전값 numOfRows=100으로 자동 축소합니다.")
+    print("  -> [WARN] 요청보다 적게 옴 (잘림 위험, offset 밀려서 데이터 유실 가능).")
+    print("  -> 검증된 안전값 numOfRows=100으로 자동 축소합니다.")
     return 100
 
 
