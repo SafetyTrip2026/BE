@@ -9,6 +9,8 @@ on:
       - 'tools/**'
       - 'preprocessors/**'
       - 'requirements.txt'
+      - '.github/workflows/docker-cd.yml'
+  workflow_dispatch:  # Actions 탭에서 수동 실행 가능
 
 permissions:
   contents: read
