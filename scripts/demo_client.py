@@ -53,6 +53,15 @@ def run(query: str, base_url: str = "http://localhost:8000"):
             elif current_event == "citation":
                 print(f"[인용] {', '.join(data['ids'])}")
 
+            elif current_event == "error":
+                print(f"\n[오류 - parse 단계 LLM 완전 실패] {data['message']}")
+                print(f"  연락처: {data['contact']['agency']} ({data['contact']['phone']})")
+
+            elif current_event == "degraded":
+                print(f"\n[강등 - 답변생성 단계 LLM 완전 실패] {data['reason']}")
+                print(f"  연락처: {data['contact']['agency']} ({data['contact']['phone']})")
+                print("  (이어지는 token 이벤트에 행동요령 원문이 담겨서 옵니다)\n")
+
             elif current_event == "token":
                 # 여기가 핵심: 토큰을 그냥 계속 이어붙여서 바로 출력
                 text = data["text"]

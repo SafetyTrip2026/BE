@@ -1,25 +1,65 @@
 """
 Solar Chat API 래퍼.
 - parse_user_query: 자유 텍스트 -> 구조화 JSON (지역/시기/의도/재난유형/노약자 여부)
-- stream_response: 최종 답변을 토큰 단위로 스트리밍 생성 (SSE에서 그대로 사용)
+- stream_response_safe: 최종 답변을 토큰 단위로 스트리밍 생성 (SSE에서 그대로 사용)
 
 Solar Chat Completions는 OpenAI SDK와 호환되는 인터페이스를 제공함
 (base_url만 바꿔서 openai 패키지 그대로 사용).
+
+LLM 3단 방어 (기획서 4번 섹션):
+① 호출당 timeout 30초
+② 일시 오류 시 지수 백오프 재시도 최대 2회
+③ 최종 실패 시 답변 생성 대신 행동요령 원문 + 대응기관 안내로 안전하게 강등
+   (③은 main.py에서 LLMUnavailableError/LLMStreamInterruptedError를 잡아서 처리)
 """
 import os
 import json
 import re
+import time
+import logging
 
-from openai import OpenAI
+from openai import (
+    OpenAI,
+    APITimeoutError,
+    APIConnectionError,
+    RateLimitError,
+    InternalServerError,
+    AuthenticationError,
+    PermissionDeniedError,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("llm_client")
 
 UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")
 # 모델명은 .env로 오버라이드 가능 (Upstage 콘솔에서 실제 사용 가능한 모델명 확인 후 조정)
 SOLAR_MODEL = os.getenv("SOLAR_MODEL", "solar-pro2")
 
+# 3단 방어 설정값
+REQUEST_TIMEOUT_SECONDS = 30
+MAX_RETRIES = 2
+BACKOFF_BASE_SECONDS = 1  # 1초 -> 2초로 지수 증가
+
+# 재시도 대상으로 볼 예외 (일시적 오류 성격만 - 타임아웃/연결끊김/속도제한/서버내부오류)
+RETRYABLE_EXCEPTIONS = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
+
+# 재시도해도 절대 성공 못하는 영구적 오류 (인증/권한) - 재시도는 스킵하되
+# 여전히 LLMUnavailableError로 변환해서 강등 처리로 이어지게 함
+FATAL_EXCEPTIONS = (AuthenticationError, PermissionDeniedError)
+
 _client = None
+
+
+class LLMUnavailableError(Exception):
+    """재시도를 전부 소진했는데 토큰을 하나도 못 받은 경우 (완전 실패)"""
+    pass
+
+
+class LLMStreamInterruptedError(Exception):
+    """일부 토큰은 정상 전달됐는데 중간에 스트림이 끊긴 경우 (부분 실패)"""
+    pass
 
 
 def get_client() -> OpenAI:
@@ -27,8 +67,37 @@ def get_client() -> OpenAI:
     if _client is None:
         if not UPSTAGE_API_KEY:
             raise RuntimeError("UPSTAGE_API_KEY가 .env에 설정되지 않았습니다.")
-        _client = OpenAI(api_key=UPSTAGE_API_KEY, base_url="https://api.upstage.ai/v1")
+        _client = OpenAI(
+            api_key=UPSTAGE_API_KEY,
+            base_url="https://api.upstage.ai/v1",
+            timeout=REQUEST_TIMEOUT_SECONDS,  # ① 호출당 timeout 30초
+        )
     return _client
+
+
+def _call_with_backoff(fn, *args, **kwargs):
+    """
+    ② 일시 오류 시 지수 백오프 재시도 (최대 MAX_RETRIES회).
+    RETRYABLE_EXCEPTIONS만 재시도하고, FATAL_EXCEPTIONS(인증/권한 오류)는
+    재시도해도 성공할 수 없으므로 즉시 전파. 그 외 예외도 즉시 전파.
+    재시도를 다 소진하면 마지막 예외를 그대로 던짐 (호출부에서 처리).
+    """
+    last_exc = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except FATAL_EXCEPTIONS as e:
+            logger.error(f"Solar API 인증/권한 오류 (재시도 무의미, 즉시 실패): {e}")
+            raise
+        except RETRYABLE_EXCEPTIONS as e:
+            last_exc = e
+            if attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE_SECONDS * (2 ** attempt)
+                logger.warning(f"Solar API 호출 실패(시도 {attempt + 1}/{MAX_RETRIES + 1}): {e}. {wait}초 후 재시도.")
+                time.sleep(wait)
+            else:
+                logger.error(f"Solar API 호출 최종 실패 ({MAX_RETRIES + 1}회 시도 소진): {e}")
+    raise last_exc
 
 
 PARSE_SYSTEM_PROMPT = """당신은 여행 안전 챗봇의 질문 분석기입니다.
@@ -58,7 +127,9 @@ def _strip_code_fence(text: str) -> str:
 def parse_user_query(query: str) -> dict:
     """
     사용자 질문을 구조화 JSON으로 변환.
-    실패 시(모델이 JSON을 안 지켰을 때) 한 번 더 명시적으로 재시도.
+    - JSON 형식이 안 맞으면(모델이 지침을 안 따른 경우) 최대 1번 더 명시적으로 재요청
+    - API 자체가 일시적으로 실패하면(타임아웃/연결오류 등) _call_with_backoff가 재시도
+    - 그래도 최종 실패하면 LLMUnavailableError 발생 (파싱 실패와는 다른 상황이라 구분)
     """
     client = get_client()
     messages = [
@@ -67,11 +138,16 @@ def parse_user_query(query: str) -> dict:
     ]
 
     for attempt in range(2):
-        resp = client.chat.completions.create(
-            model=SOLAR_MODEL,
-            messages=messages,
-            temperature=0,
-        )
+        try:
+            resp = _call_with_backoff(
+                client.chat.completions.create,
+                model=SOLAR_MODEL,
+                messages=messages,
+                temperature=0,
+            )
+        except (RETRYABLE_EXCEPTIONS + FATAL_EXCEPTIONS) as e:
+            raise LLMUnavailableError(f"parse 단계에서 Solar API 호출 실패: {e}") from e
+
         raw = resp.choices[0].message.content
         try:
             cleaned = _strip_code_fence(raw)
@@ -152,11 +228,8 @@ def build_respond_prompt(user_query: str, stats_result, retrieved_guidelines: li
     ]
 
 
-def stream_response(messages: list):
-    """
-    SSE 엔드포인트에서 그대로 소비할 스트리밍 제너레이터.
-    yield하는 값은 토큰 텍스트 조각(str).
-    """
+def _stream_once(messages: list):
+    """실제 API 스트리밍 호출 1회 (재시도/방어 로직 없는 원본)"""
     client = get_client()
     stream = client.chat.completions.create(
         model=SOLAR_MODEL,
@@ -167,3 +240,69 @@ def stream_response(messages: list):
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
+
+
+def stream_response_safe(messages: list):
+    """
+    SSE 엔드포인트에서 소비할 스트리밍 제너레이터. 3단 방어 적용:
+    ① timeout 30초 (get_client에서 클라이언트 생성 시 설정됨)
+    ② 재시도: 이번 시도에서 토큰을 하나도 못 받은 상태에서 실패하면
+       -> 아직 사용자에게 아무것도 안 보낸 상태이므로 안전하게 재시도 가능
+    ③ 최종 실패:
+       - 토큰을 하나도 못 받고 재시도까지 소진 -> LLMUnavailableError
+         (호출부가 행동요령 원문 + 대응기관 안내로 강등 처리)
+       - 이미 일부 토큰은 보낸 뒤 중간에 실패 -> LLMStreamInterruptedError
+         (재시도하면 앞부분이 중복되므로 재시도하지 않고 중단 처리)
+    """
+    last_exc = None
+
+    for attempt in range(MAX_RETRIES + 1):
+        yielded_any = False
+        try:
+            for delta in _stream_once(messages):
+                yielded_any = True
+                yield delta
+            return  # 정상 완료
+        except FATAL_EXCEPTIONS as e:
+            # 인증/권한 오류는 재시도해도 성공 못하므로 즉시 강등 처리로 넘김
+            logger.error(f"인증/권한 오류로 즉시 실패 처리: {e}")
+            if yielded_any:
+                raise LLMStreamInterruptedError(str(e)) from e
+            raise LLMUnavailableError(str(e)) from e
+        except RETRYABLE_EXCEPTIONS as e:
+            last_exc = e
+            if yielded_any:
+                # 이미 일부 응답이 나간 상태 -> 재시도하면 중복/모순 발생, 중단 처리로 넘김
+                logger.error(f"스트리밍 중간에 끊김 (이미 일부 토큰 전송됨): {e}")
+                raise LLMStreamInterruptedError(str(e)) from e
+
+            if attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE_SECONDS * (2 ** attempt)
+                logger.warning(f"스트리밍 시작 전 실패(시도 {attempt + 1}/{MAX_RETRIES + 1}): {e}. {wait}초 후 재시도.")
+                time.sleep(wait)
+            else:
+                logger.error(f"스트리밍 최종 실패 ({MAX_RETRIES + 1}회 시도 소진): {e}")
+
+    raise LLMUnavailableError(str(last_exc))
+
+
+def build_degraded_fallback_text(retrieved_guidelines: list) -> str:
+    """
+    ③ LLM 최종 실패 시 사용. LLM 가공 없이 검색된 행동요령 원문을 그대로 나열.
+    (LLM이 없어도 이미 pgvector 검색은 완료된 상태이므로, 이 원문 자체는 신뢰 가능한 공식 데이터)
+    """
+    if not retrieved_guidelines:
+        return "현재 상세 답변 생성이 어렵습니다. 아래 공식 연락처로 문의해 주세요."
+
+    lines = ["※ 현재 AI 응답 생성에 일시적 문제가 있어, 검색된 공식 행동요령 원문을 그대로 안내합니다.\n"]
+    grouped: dict = {}
+    for g in retrieved_guidelines:
+        key = g.get("matched_disaster_type") or g.get("cate_nm2") or "일반"
+        grouped.setdefault(key, []).append(g)
+
+    for dtype, items in grouped.items():
+        lines.append(f"\n[{dtype}]")
+        for g in items:
+            lines.append(f"- ({g['cate_nm3']}) {g['content']}")
+
+    return "\n".join(lines)
