@@ -3,3 +3,7 @@ python-dotenv
 pandas
 psycopg2-binary
 sqlalchemy
+fastapi
+uvicorn[standard]
+langgraph
+openai
