@@ -1,5 +1,6 @@
 """
-FastAPI 앱. SSE로 그래프 판단 결과(meta) + 스트리밍 답변(token)을 순서대로 흘려보냄.
+FastAPI 앱. SSE로 parsed -> stats -> [escalate|citation+token 반복] -> done 순서로 흘려보냄.
+(프론트 UI의 지역/시기/동반자 패널, 위험도 점수 차트, 인용 배지에 맞춘 이벤트 구조)
 
 실행: uvicorn app.main:app --reload --port 8000
 테스트: curl -N -X POST http://localhost:8000/chat/stream \
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from app.graph.build_graph import build_graph
 from app.llm_client import build_respond_prompt, stream_response
+from app.citation import build_citation_ids
 
 app = FastAPI(title="재난안전 여행 가이드 API")
 
@@ -39,6 +41,30 @@ class ChatRequest(BaseModel):
 def sse_event(event: str, data: dict) -> str:
     """SSE 포맷 한 줄 생성"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def compute_risk_scores(breakdown: list, top_n: int = 3) -> list:
+    """
+    프론트 '위험도 점수' 차트용 0~100 스케일 점수 계산.
+    "기타"(재난유형 아닌 잡다한 안전공지)는 제외하고, 상위 top_n개 안에서의
+    상대 비중으로 재계산함 (기타 비율에 가려서 실제 재난 위험도가 왜곡되는 걸 방지).
+    """
+    real_types = [b for b in breakdown if b["disaster_type"] != "기타"][:top_n]
+    if not real_types:
+        return []
+
+    total = sum(b["count"] for b in real_types)
+    if total == 0:
+        return []
+
+    return [
+        {
+            "disaster_type": b["disaster_type"],
+            "risk_score": round(b["count"] / total * 100),
+            "count": b["count"],
+        }
+        for b in real_types
+    ]
 
 
 def generate_sse_stream(user_query: str):
@@ -62,33 +88,35 @@ def generate_sse_stream(user_query: str):
         yield sse_event("done", {})
         return
 
-    # 3) meta 이벤트: 통계/검색결과 요약 (프론트에서 차트 그릴 때 사용)
-    stats_result = result_state.get("stats_result")
-    meta = {
-        "region_sido": result_state.get("region_sido"),
-        "region_sigungu": result_state.get("region_sigungu"),
-        "month": result_state.get("month"),
-        "intent": result_state.get("intent"),
-        "stats": {
-            "scope_used": stats_result.scope_used if stats_result else None,
-            "total_count": stats_result.total_count if stats_result else None,
-            "breakdown": stats_result.breakdown if stats_result else [],
-            "fallback_notice": stats_result.fallback_notice if stats_result else None,
-        } if stats_result else None,
-        "guideline_sources": [
-            {
-                "matched_disaster_type": g.get("matched_disaster_type"),
-                "cate_nm2": g["cate_nm2"],
-                "cate_nm3": g["cate_nm3"],
-                "distance": g["distance"],
-            }
-            for g in (result_state.get("retrieved_guidelines") or [])
-        ],
-        "should_escalate": result_state.get("should_escalate", False),
-    }
-    yield sse_event("meta", meta)
+    # 3) parsed 이벤트: 지역/시기/동반자 (프론트 좌측 패널용)
+    region_sido = result_state.get("region_sido")
+    region_sigungu = result_state.get("region_sigungu")
+    region_label = " ".join(p for p in [region_sido, region_sigungu] if p) or "-"
+    month = result_state.get("month")
+    month_label = f"{month}월" if month else "-"
+    companions_label = "노약자 동반" if result_state.get("has_vulnerable") else "-"
 
-    # 4) 에스컬레이션 분기
+    yield sse_event("parsed", {
+        "region": region_label,
+        "month": month_label,
+        "companions": companions_label,
+        "intent": intent,
+        "disaster_type": result_state.get("disaster_type"),
+    })
+
+    # 4) stats 이벤트: 위험도 점수 차트용 데이터
+    stats_result = result_state.get("stats_result")
+    if stats_result:
+        risk_scores = compute_risk_scores(stats_result.breakdown)
+        yield sse_event("stats", {
+            "scope_used": stats_result.scope_used,
+            "total_count": stats_result.total_count,
+            "risk_scores": risk_scores,
+            "top_risk": risk_scores[0]["disaster_type"] if risk_scores else None,
+            "fallback_notice": stats_result.fallback_notice,
+        })
+
+    # 5) 에스컬레이션 분기
     if result_state.get("should_escalate"):
         from app.graph.nodes import escalate_node
         escalate_result = escalate_node(result_state)
@@ -104,11 +132,16 @@ def generate_sse_stream(user_query: str):
         yield sse_event("done", {})
         return
 
-    # 5) 정상 응답: LLM 스트리밍
+    # 6) citation 이벤트: 인용 배지 (GUIDE-HEAT-ELDERLY-001 형식)
+    retrieved_guidelines = result_state.get("retrieved_guidelines") or []
+    citation_ids = build_citation_ids(retrieved_guidelines)
+    yield sse_event("citation", {"ids": citation_ids})
+
+    # 7) 정상 응답: LLM 스트리밍
     messages = build_respond_prompt(
         user_query=user_query,
         stats_result=stats_result,
-        retrieved_guidelines=result_state.get("retrieved_guidelines") or [],
+        retrieved_guidelines=retrieved_guidelines,
         has_vulnerable=result_state.get("has_vulnerable", False),
     )
 
