@@ -19,8 +19,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.graph.build_graph import build_graph
-from app.llm_client import build_respond_prompt, stream_response
+from app.llm_client import (
+    build_respond_prompt,
+    stream_response_safe,
+    build_degraded_fallback_text,
+    LLMUnavailableError,
+    LLMStreamInterruptedError,
+)
 from app.citation import build_citation_ids
+from preprocessors.disaster_type_phone_map import get_contact
 
 app = FastAPI(title="재난안전 여행 가이드 API")
 
@@ -69,7 +76,16 @@ def compute_risk_scores(breakdown: list, top_n: int = 3) -> list:
 
 def generate_sse_stream(user_query: str):
     # 1) 그래프 실행 (parse -> stats/retrieve -> gate, 여기까진 논스트리밍)
-    result_state = _graph.invoke({"user_query": user_query})
+    # parse 단계에서 Solar API가 재시도까지 소진하고 완전히 실패하면 LLMUnavailableError 발생
+    try:
+        result_state = _graph.invoke({"user_query": user_query})
+    except LLMUnavailableError:
+        yield sse_event("error", {
+            "message": "일시적으로 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+            "contact": get_contact("기타"),
+        })
+        yield sse_event("done", {})
+        return
 
     # 2) 파싱 실패 -> 재질문 요청
     # (reactive 질문은 region_sido 없어도 정상이라, prevention일 때만 지역 필수로 체크)
@@ -137,7 +153,8 @@ def generate_sse_stream(user_query: str):
     citation_ids = build_citation_ids(retrieved_guidelines)
     yield sse_event("citation", {"ids": citation_ids})
 
-    # 7) 정상 응답: LLM 스트리밍
+    # 7) 정상 응답: LLM 스트리밍 (3단 방어 적용됨 - stream_response_safe 내부에서
+    #    timeout/재시도 처리하고, 그래도 실패하면 예외로 알려줌)
     messages = build_respond_prompt(
         user_query=user_query,
         stats_result=stats_result,
@@ -145,8 +162,26 @@ def generate_sse_stream(user_query: str):
         has_vulnerable=result_state.get("has_vulnerable", False),
     )
 
-    for token in stream_response(messages):
-        yield sse_event("token", {"text": token})
+    try:
+        for token in stream_response_safe(messages):
+            yield sse_event("token", {"text": token})
+
+    except LLMUnavailableError:
+        # ③ 최종 실패, 토큰 하나도 못 보낸 상태 -> 행동요령 원문 + 대응기관 안내로 강등
+        fallback_text = build_degraded_fallback_text(retrieved_guidelines)
+        yield sse_event("degraded", {
+            "reason": "AI 응답 생성 서비스에 일시적 장애가 발생했습니다.",
+            "contact": get_contact(result_state.get("disaster_type") or "기타"),
+        })
+        yield sse_event("token", {"text": fallback_text})
+
+    except LLMStreamInterruptedError:
+        # ③ 부분 실패, 이미 일부 답변은 전송됨 -> 이어서 중단 안내만 추가 (재시작하면 중복되므로 안 함)
+        contact = get_contact(result_state.get("disaster_type") or "기타")
+        yield sse_event("token", {
+            "text": f"\n\n(※ 응답 생성이 중간에 중단되었습니다. 추가 문의는 {contact['agency']} "
+                    f"({contact['phone']})로 연락해 주세요.)"
+        })
 
     yield sse_event("done", {})
 
