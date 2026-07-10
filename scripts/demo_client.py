@@ -37,11 +37,21 @@ def run(query: str, base_url: str = "http://localhost:8000"):
             payload = raw_line[len("data:"):].strip()
             data = json.loads(payload)
 
-            if current_event == "meta":
-                print("[통계/검색 요약]")
-                print(json.dumps(data, ensure_ascii=False, indent=2))
+            if current_event == "parsed":
+                print(f"[지역] {data['region']}  [시기] {data['month']}  [동반자] {data['companions']}")
+                print("-" * 60)
+
+            elif current_event == "stats":
+                print("[위험도 점수]")
+                for item in data.get("risk_scores", []):
+                    print(f"  {item['disaster_type']}: {item['risk_score']}점 (건수 {item['count']})")
+                if data.get("fallback_notice"):
+                    print(f"  [안내] {data['fallback_notice']}")
                 print("-" * 60)
                 print("[답변]\n")
+
+            elif current_event == "citation":
+                print(f"[인용] {', '.join(data['ids'])}")
 
             elif current_event == "token":
                 # 여기가 핵심: 토큰을 그냥 계속 이어붙여서 바로 출력
