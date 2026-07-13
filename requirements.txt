@@ -11,3 +11,4 @@ psycopg[binary]
 langchain
 openai
 langfuse
+langsmith
