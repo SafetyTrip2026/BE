@@ -28,6 +28,7 @@ from app.llm_client import (
 )
 from app.citation import build_citation_ids
 from preprocessors.disaster_type_phone_map import get_contact
+from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 
 app = FastAPI(title="재난안전 여행 가이드 API")
 
@@ -78,7 +79,11 @@ def generate_sse_stream(user_query: str):
     # 1) 그래프 실행 (parse -> stats/retrieve -> gate, 여기까진 논스트리밍)
     # parse 단계에서 Solar API가 재시도까지 소진하고 완전히 실패하면 LLMUnavailableError 발생
     try:
-        result_state = _graph.invoke({"user_query": user_query})
+        langfuse_handler = LangfuseCallbackHandler()
+        result_state = _graph.invoke(
+            {"user_query": user_query},
+            config={"callbacks": [langfuse_handler]},
+        )
     except LLMUnavailableError:
         yield sse_event("error", {
             "message": "일시적으로 AI 서비스에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.",

@@ -6,4 +6,6 @@ sqlalchemy
 fastapi
 uvicorn[standard]
 langgraph
+langchain
 openai
+langfuse

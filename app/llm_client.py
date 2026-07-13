@@ -19,7 +19,6 @@ import time
 import logging
 
 from openai import (
-    OpenAI,
     APITimeoutError,
     APIConnectionError,
     RateLimitError,
@@ -27,6 +26,9 @@ from openai import (
     AuthenticationError,
     PermissionDeniedError,
 )
+# Langfuse 드롭인 교체: OpenAI 클라이언트를 이걸로 쓰면 모든 chat.completions 호출
+# (파싱 + 스트리밍 둘 다)이 자동으로 Langfuse에 트레이싱됨. 인터페이스는 원본과 동일.
+from langfuse.openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -144,6 +146,7 @@ def parse_user_query(query: str) -> dict:
                 model=SOLAR_MODEL,
                 messages=messages,
                 temperature=0,
+                name="parse_user_query",  # Langfuse 대시보드에서 이 이름으로 구분됨
             )
         except (RETRYABLE_EXCEPTIONS + FATAL_EXCEPTIONS) as e:
             raise LLMUnavailableError(f"parse 단계에서 Solar API 호출 실패: {e}") from e
@@ -235,6 +238,7 @@ def _stream_once(messages: list):
         model=SOLAR_MODEL,
         messages=messages,
         stream=True,
+        name="respond_stream",  # Langfuse 대시보드에서 이 이름으로 구분됨
     )
     for chunk in stream:
         delta = chunk.choices[0].delta.content
