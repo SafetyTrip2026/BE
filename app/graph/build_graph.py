@@ -27,7 +27,12 @@ from app.graph.nodes import (
 )
 
 
-def build_graph():
+def build_graph(checkpointer=None):
+    """
+    checkpointer를 넘기면 대화 세션(thread_id 기준) 상태가 Postgres에 저장/복원됨.
+    안 넘기면(None) 기존처럼 매 호출이 독립적 (테스트/평가 스크립트에서 이렇게 씀 -
+    eval/run_eval.py는 30건을 서로 무관하게 돌려야 하므로 체크포인터 없이 호출).
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("parse", parse_node)
@@ -64,4 +69,4 @@ def build_graph():
 
     graph.add_edge("escalate", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

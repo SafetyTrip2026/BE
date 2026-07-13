@@ -10,6 +10,7 @@ FastAPI 앱. SSE로 parsed -> stats -> [escalate|citation+token 반복] -> done 
 import sys
 import os
 import json
+import uuid
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.graph.build_graph import build_graph
+from app.checkpointer import get_checkpointer
 from app.llm_client import (
     build_respond_prompt,
     stream_response_safe,
@@ -39,11 +41,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_graph = build_graph()
+# 체크포인터 연결: thread_id 기준으로 대화 세션 상태가 Supabase에 저장/복원됨
+# (테이블은 사전에 loaders/setup_checkpointer.py로 1회 생성해둬야 함)
+_graph = build_graph(checkpointer=get_checkpointer())
 
 
 class ChatRequest(BaseModel):
     query: str
+    thread_id: str | None = None  # 대화 세션 ID. 프론트가 이전 응답에서 받은 값을
+                                    # 그대로 다시 보내면 대화가 이어짐. 없으면 새로 생성.
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -75,14 +81,22 @@ def compute_risk_scores(breakdown: list, top_n: int = 3) -> list:
     ]
 
 
-def generate_sse_stream(user_query: str):
+def generate_sse_stream(user_query: str, thread_id: str):
+    # 0) 세션 ID 안내 (제일 먼저, 어떤 분기로 가든 항상 전송)
+    # 프론트는 이 값을 저장해두고, 다음 요청 body의 thread_id에 그대로 담아 보내면
+    # 대화가 이어짐 (지역/시기/동반자 등 이전 턴 맥락을 이어받음)
+    yield sse_event("session", {"thread_id": thread_id})
+
     # 1) 그래프 실행 (parse -> stats/retrieve -> gate, 여기까진 논스트리밍)
     # parse 단계에서 Solar API가 재시도까지 소진하고 완전히 실패하면 LLMUnavailableError 발생
     try:
         langfuse_handler = LangfuseCallbackHandler()
         result_state = _graph.invoke(
             {"user_query": user_query},
-            config={"callbacks": [langfuse_handler]},
+            config={
+                "callbacks": [langfuse_handler],
+                "configurable": {"thread_id": thread_id},
+            },
         )
     except LLMUnavailableError:
         yield sse_event("error", {
@@ -194,8 +208,9 @@ def generate_sse_stream(user_query: str):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
+    thread_id = req.thread_id or str(uuid.uuid4())
     return StreamingResponse(
-        generate_sse_stream(req.query),
+        generate_sse_stream(req.query, thread_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
