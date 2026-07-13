@@ -32,6 +32,9 @@ jobs:
               docker rm $EXISTING || true
             fi
 
+            echo "'disaster-agent-be' 이름을 쓰는 컨테이너도 확실히 정리 (포트 상태 무관)..."
+            docker rm -f disaster-agent-be || true
+
             echo "새 컨테이너 실행..."
             docker run -d \
               --name disaster-agent-be \
