@@ -22,14 +22,30 @@ RELEVANCE_THRESHOLD = 0.6
 
 
 def parse_node(state: AgentState) -> dict:
+    """
+    체크포인터가 연결되어 있으면, 이 노드가 실행되기 전 `state`에는 같은
+    thread_id의 '이전 턴' 값들이 이미 복원되어 들어와 있음 (user_query만
+    이번 호출에서 새로 덮어써짐). 이번 턴에서 못 뽑은 필드는 이전 값을
+    그대로 이어받아서, "그럼 노약자는 뭘 더 챙겨야 해?" 같은 맥락 의존적인
+    후속 질문도 지역/시기 정보 없이 자연스럽게 처리되게 함.
+    (체크포인터 없이 호출되면 state에 이전 값이 없어서 그냥 None -> 문제없이 폴백)
+    """
     parsed = parse_user_query(state["user_query"])
+
+    region_sido = parsed.get("region_sido") or state.get("region_sido")
+    region_sigungu = parsed.get("region_sigungu") or state.get("region_sigungu")
+    month = parsed.get("month") or state.get("month")
+    disaster_type = parsed.get("disaster_type") or state.get("disaster_type")
+    # has_vulnerable은 한 번 언급되면 대화 내내 유효하다고 보고 OR로 유지
+    has_vulnerable = bool(parsed.get("has_vulnerable")) or bool(state.get("has_vulnerable"))
+
     return {
-        "region_sido": parsed.get("region_sido"),
-        "region_sigungu": parsed.get("region_sigungu"),
-        "month": parsed.get("month"),
-        "intent": parsed.get("intent"),
-        "disaster_type": parsed.get("disaster_type"),
-        "has_vulnerable": bool(parsed.get("has_vulnerable")),
+        "region_sido": region_sido,
+        "region_sigungu": region_sigungu,
+        "month": month,
+        "intent": parsed.get("intent"),  # intent는 후속 질문마다 새로 판단 (다른 의도일 수 있음)
+        "disaster_type": disaster_type,
+        "has_vulnerable": has_vulnerable,
         "parse_failed": bool(parsed.get("_parse_failed", False)),
     }
 
@@ -84,9 +100,11 @@ def retrieve_node(state: AgentState) -> dict:
             - 원본 문장 자체가 이미 구체적 상황 설명을 담고 있어 검색에 충분한 경우가 많음.
     """
     intent = state.get("intent")
+    has_vulnerable = state.get("has_vulnerable", False)
+    vulnerable_note = " 노약자 동반 시 주의사항 포함" if has_vulnerable else ""
 
     if intent == "reactive" and state.get("disaster_type"):
-        query = f"{state['disaster_type']} 발생 시 행동요령"
+        query = f"{state['disaster_type']} 발생 시 행동요령{vulnerable_note}"
         results = retrieve_guidelines(query, top_k=5)
         for r in results:
             r["matched_disaster_type"] = state["disaster_type"]
@@ -114,16 +132,18 @@ def retrieve_node(state: AgentState) -> dict:
 
         if not top_types:
             # 통계에 유의미한 재난유형이 없으면(전부 기타 등) 지역 기반 일반 안전정보로 폴백
-            query = f"{state.get('region_sido', '')} 여행 안전 주의사항"
+            query = f"{state.get('region_sido', '')} 여행 안전 주의사항{vulnerable_note}"
             results = retrieve_guidelines(query, top_k=5)
             for r in results:
                 r["matched_disaster_type"] = None
             return {"retrieved_guidelines": results}
 
         # 재난유형별로 각각 검색해서 결과를 합침 (유형마다 top_k=3)
+        # has_vulnerable이면 쿼리에 "노약자 동반" 명시 -> 각 재난유형 행동요령 안에
+        # 섞여있는 노약자 특화 문구(예: "부모님 약물 복용 여부 확인")가 더 잘 검색되게 함
         all_results = []
         for dtype in top_types:
-            query = f"{dtype} 발생 시 행동요령 및 대비"
+            query = f"{dtype} 발생 시 행동요령 및 대비{vulnerable_note}"
             per_type_results = retrieve_guidelines(query, top_k=3)
             for r in per_type_results:
                 r["matched_disaster_type"] = dtype
