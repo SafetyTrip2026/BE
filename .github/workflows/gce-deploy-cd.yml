@@ -32,6 +32,9 @@ jobs:
               docker rm $EXISTING || true
             fi
 
+            echo "'disaster-agent-be' 이름을 쓰는 컨테이너도 확실히 정리 (포트 상태 무관)..."
+            docker rm -f disaster-agent-be || true
+
             echo "새 컨테이너 실행..."
             docker run -d \
               --name disaster-agent-be \
@@ -40,6 +43,16 @@ jobs:
               --env-file /home/appuser/.env.backend \
               ghcr.io/safetytrip2026/be:latest
 
-            echo "헬스체크..."
-            sleep 3
-            curl -f http://localhost:8080/health || (echo "헬스체크 실패" && exit 1)
+            echo "헬스체크 (최대 30초, 3초 간격 재시도)..."
+            for i in $(seq 1 10); do
+              if curl -f -s http://localhost:8080/health > /dev/null; then
+                echo "헬스체크 성공"
+                exit 0
+              fi
+              echo "  대기 중... ($i/10)"
+              sleep 3
+            done
+
+            echo "헬스체크 실패. 컨테이너 로그 출력:"
+            docker logs disaster-agent-be --tail 100
+            exit 1
