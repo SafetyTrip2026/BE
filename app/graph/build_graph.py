@@ -1,6 +1,7 @@
 """
 LangGraph 그래프 구성.
-parse -> [조건분기: 실패시 종료] -> stats + retrieve(병렬 성격이지만 여기선 순차) -> gate
+parse -> [조건분기: 실패시 종료] -> stats + retrieve(병렬 성격이지만 여기선 순차)
+     -> gate(1차: 거리 임계값) -> judge(2차: LLM 적합성 판정) -> escalate | END
 
 gate 이후(respond 스트리밍 / escalate)는 SSE 특성상 main.py에서 직접 처리.
 (LangGraph 노드 자체를 스트리밍시키는 대신, 그래프는 "판단"까지만 하고
@@ -21,6 +22,7 @@ from app.graph.nodes import (
     stats_node,
     retrieve_node,
     gate_node,
+    judge_node,
     escalate_node,
 )
 
@@ -32,6 +34,7 @@ def build_graph():
     graph.add_node("stats", stats_node)
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("gate", gate_node)
+    graph.add_node("judge", judge_node)
     graph.add_node("escalate", escalate_node)
 
     graph.set_entry_point("parse")
@@ -47,9 +50,11 @@ def build_graph():
 
     graph.add_edge("stats", "retrieve")
     graph.add_edge("retrieve", "gate")
+    graph.add_edge("gate", "judge")  # 1차 게이트 통과/실패 여부와 무관하게 항상 judge를 거침
+                                       # (judge_node 내부에서 1차가 이미 escalate면 스킵함)
 
     graph.add_conditional_edges(
-        "gate",
+        "judge",
         lambda state: "escalate" if state.get("should_escalate") else "respond_ready",
         {
             "escalate": "escalate",

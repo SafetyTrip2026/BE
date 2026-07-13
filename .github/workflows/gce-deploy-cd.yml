@@ -1,0 +1,45 @@
+name: GCE Deploy CD
+
+# Docker Build & Push CD가 성공적으로 끝난 뒤에 이어서 실행됨 (이미지가 준비된 다음에 배포해야 하므로)
+on:
+  workflow_run:
+    workflows: ["Docker Build & Push CD"]
+    types: [completed]
+  workflow_dispatch:  # Actions 탭에서 수동 실행도 가능
+
+jobs:
+  deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GCE via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.GCE_HOST }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.GCE_SSH_KEY }}
+          script: |
+            set -e
+            echo "최신 이미지 pull 중..."
+            docker pull ghcr.io/safetytrip2026/be:latest
+
+            echo "8080 포트를 쓰는 기존 컨테이너 정리 (이름 무관, 이전에 수동으로 띄운 것도 포함)..."
+            EXISTING=$(docker ps -aq --filter "publish=8080")
+            if [ -n "$EXISTING" ]; then
+              docker stop $EXISTING || true
+              docker rm $EXISTING || true
+            fi
+
+            echo "새 컨테이너 실행..."
+            docker run -d \
+              --name disaster-agent-be \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              --env-file /home/appuser/.env.backend \
+              ghcr.io/safetytrip2026/be:latest
+
+            echo "헬스체크..."
+            sleep 3
+            curl -f http://localhost:8080/health || (echo "헬스체크 실패" && exit 1)
