@@ -1,13 +1,13 @@
 {
-  "accuracy": 0.7666666666666667,
-  "precision": 1.0,
-  "recall": 0.3333333333333333,
-  "f1": 0.5,
+  "accuracy": 0.8,
+  "precision": 0.7,
+  "recall": 0.7777777777777778,
+  "f1": 0.7368421052631577,
   "confusion_matrix": {
-    "tp": 3,
-    "fp": 0,
-    "fn": 6,
-    "tn": 20
+    "tp": 7,
+    "fp": 3,
+    "fn": 2,
+    "tn": 17
   },
   "reask_count": 1,
   "error_count": 0,
@@ -49,8 +49,8 @@
       "expected_result": "answer",
       "expected_disaster_type": "한파",
       "rationale": "한파 평상시 영유아 체온 관리 및 보일러 배관 동파 방지 수칙이 DB에 명시되어 있습니다.",
-      "actual_result": "answer",
-      "match": true
+      "actual_result": "escalate",
+      "match": false
     },
     {
       "id": 5,
@@ -109,8 +109,8 @@
       "expected_result": "answer",
       "expected_disaster_type": "산불",
       "rationale": "산불 평시 대비 입산통제구역 출입 금지 및 앱을 통한 화재 신고 요령이 DB에 정의되어 있습니다.",
-      "actual_result": "answer",
-      "match": true
+      "actual_result": "escalate",
+      "match": false
     },
     {
       "id": 11,
@@ -199,8 +199,8 @@
       "expected_result": "answer",
       "expected_disaster_type": "해양오염사고",
       "rationale": "해양오염사고 발생 시 호흡기 보호 대피 및 오염물 접촉 시 비누 세척 수칙이 DB에 존재합니다.",
-      "actual_result": "answer",
-      "match": true
+      "actual_result": "escalate",
+      "match": false
     },
     {
       "id": 20,
@@ -286,8 +286,8 @@
       "expected_result": "escalate",
       "expected_disaster_type": null,
       "rationale": "지진과 지진해일 단어가 모두 포함되어 벡터 검색이 교차할 수 있으나, 단순 과학적 연쇄 메커니즘은 행동요령 매뉴얼에 없으므로 에스컬레이션되어야 합니다.",
-      "actual_result": "answer",
-      "match": false
+      "actual_result": "escalate",
+      "match": true
     },
     {
       "id": 28,
@@ -297,8 +297,8 @@
       "expected_result": "escalate",
       "expected_disaster_type": null,
       "rationale": "여름철물놀이/해파리 수칙은 있지만 바다뱀 등 '해양 유독 생물 전체 해독 수칙'은 범위 밖의 경계선 케이스이므로 답변을 거부해야 합니다.",
-      "actual_result": "answer",
-      "match": false
+      "actual_result": "escalate",
+      "match": true
     },
     {
       "id": 29,
@@ -308,8 +308,8 @@
       "expected_result": "escalate",
       "expected_disaster_type": null,
       "rationale": "폭염과 응급처치 카테고리와 유사해 보이지만, 포도당 투여 등 전문 의료 응급처치 수칙은 공식 행동요령 근거가 부족하므로 에스컬레이션 대상입니다.",
-      "actual_result": "answer",
-      "match": false
+      "actual_result": "escalate",
+      "match": true
     },
     {
       "id": 30,
@@ -319,8 +319,8 @@
       "expected_result": "escalate",
       "expected_disaster_type": null,
       "rationale": "건축물 붕괴/산사태와 헷갈릴 수 있는 경계선 질문이지만, 여행객을 위한 '구조 장비 사용법'은 대피 요령 DB에 없으므로 에스컬레이션해야 합니다.",
-      "actual_result": "answer",
-      "match": false
+      "actual_result": "escalate",
+      "match": true
     }
   ]
 }

@@ -29,7 +29,6 @@ def classify_actual(result_state: dict) -> str:
     is_unrecoverable = (
         result_state.get("parse_failed")
         or (intent == "prevention" and not result_state.get("region_sido"))
-        or (intent == "reactive" and not result_state.get("disaster_type"))
         or intent not in ("prevention", "reactive")
     )
     if is_unrecoverable:
@@ -103,7 +102,7 @@ def run_eval():
     print("=== 최종 결과 ===")
     print("=" * 60)
     print(f"전체 정확도(accuracy): {accuracy:.1%} ({sum(1 for r in results if r['match'])}/{len(results)})")
-    print(f"\n[에스컬레이션 판단 기준 - escalate가 positive]")
+    print("\n[에스컬레이션 판단 기준 - escalate가 positive]")
     print(f"  TP={tp}  FP={fp}  FN={fn}  TN={tn}")
     print(f"  Precision: {precision:.1%}  (에스컬레이션했다고 한 것 중 진짜 맞은 비율)")
     print(f"  Recall:    {recall:.1%}  (진짜 에스컬레이션해야 했던 것 중 맞게 잡아낸 비율)")

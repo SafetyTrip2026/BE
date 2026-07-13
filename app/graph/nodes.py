@@ -11,7 +11,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.graph.state import AgentState
-from app.llm_client import parse_user_query
+from app.llm_client import parse_user_query, judge_relevance
 from tools.stats_tool import get_disaster_stats
 from tools.retrieve_tool import retrieve_guidelines
 from preprocessors.disaster_type_phone_map import get_contact
@@ -38,8 +38,10 @@ def route_after_parse(state: AgentState) -> str:
     """
     조건부 라우팅.
     - prevention: 통계 집계에 지역+월이 반드시 필요하므로 둘 다 있어야 진행
-    - reactive: 위치/시기 정보 없어도 되는 질문이라 disaster_type만 있으면 진행
-      (예: "호우경보 문자 받았는데 뭘 해야 하죠?" - 지역/월 언급 없음)
+    - reactive: disaster_type을 못 뽑아도 무작정 재질문하지 않음. 원본 질문 자체가
+      이미 구체적인 상황 설명(예: "붕괴 징후가 보입니다")을 담고 있는 경우가 많아서,
+      파싱이 완벽하지 않아도 벡터 검색이 원문으로 커버할 수 있음
+      (retrieve_node의 폴백 경로 참고). intent가 reactive로만 판단됐으면 진행.
     """
     if state.get("parse_failed"):
         return "parse_failed"
@@ -52,8 +54,6 @@ def route_after_parse(state: AgentState) -> str:
         return "stats_and_retrieve"
 
     if intent == "reactive":
-        if not state.get("disaster_type"):
-            return "parse_failed"
         return "stats_and_retrieve"
 
     return "parse_failed"
@@ -78,7 +78,10 @@ def retrieve_node(state: AgentState) -> dict:
             (한 문장으로 합쳐서 검색하지 않음 - 유형별 매칭 정확도를 위해)
             "기타"는 실제 행동요령 카테고리가 없는 잡다한 안전공지 묶음이라
             검색 대상에서 제외 (재난문자 취합 요약에는 그대로 남겨둠)
-    반응형: 사용자가 언급한 disaster_type으로 직접 검색
+    반응형: 사용자가 언급한 disaster_type으로 직접 검색.
+            disaster_type을 못 뽑았어도(파싱이 완벽하지 않을 수 있음) 재질문으로
+            바로 안 보내고, 원본 질문 그대로 벡터 검색하는 폴백 경로(맨 아래 else)를 씀
+            - 원본 문장 자체가 이미 구체적 상황 설명을 담고 있어 검색에 충분한 경우가 많음.
     """
     intent = state.get("intent")
 
@@ -91,12 +94,23 @@ def retrieve_node(state: AgentState) -> dict:
 
     if intent == "prevention":
         stats_result = state.get("stats_result")
-        top_types = []
+        stats_top_types = []
         if stats_result and stats_result.breakdown:
-            top_types = [
+            stats_top_types = [
                 b["disaster_type"] for b in stats_result.breakdown
                 if b["disaster_type"] != "기타"
             ][:3]
+
+        # 사용자가 질문에 명시적으로 언급한 재난유형은, 통계 상위 3개에 안 들어도
+        # 우선적으로 검색 대상에 포함 (사용자가 직접 물어본 걸 무시하면 안 됨)
+        explicit_type = state.get("disaster_type")
+        top_types = []
+        if explicit_type:
+            top_types.append(explicit_type)
+        for t in stats_top_types:
+            if t not in top_types:
+                top_types.append(t)
+        top_types = top_types[:4]  # 명시 유형 1개 + 통계 상위 최대 3개
 
         if not top_types:
             # 통계에 유의미한 재난유형이 없으면(전부 기타 등) 지역 기반 일반 안전정보로 폴백
@@ -153,6 +167,32 @@ def gate_node(state: AgentState) -> dict:
         }
 
     return {"should_escalate": False, "escalate_reason": None}
+
+
+def judge_node(state: AgentState) -> dict:
+    """
+    2차 게이트 (LLM 적합성 판정).
+    1차 게이트(코사인 거리 임계값)가 이미 에스컬레이션으로 결정했으면 LLM 호출 없이 스킵
+    (비용 절감 - 1차에서 걸러진 건 2차까지 갈 필요 없음).
+    1차를 통과한 것 중에서, 검색된 문서가 "주제는 비슷하지만 질문의 정확한 요구사항을
+    실제로 충족하지 못하는" 경계선 케이스를 추가로 걸러냄.
+    """
+    if state.get("should_escalate"):
+        return {}
+
+    guidelines = state.get("retrieved_guidelines") or []
+    if not guidelines:
+        return {}
+
+    verdict = judge_relevance(state["user_query"], guidelines)
+
+    if not verdict.get("sufficient", True):
+        return {
+            "should_escalate": True,
+            "escalate_reason": f"2차 판정(LLM): {verdict.get('reason', '질문에 대한 충분한 근거 부족')}",
+        }
+
+    return {}
 
 
 def escalate_node(state: AgentState) -> dict:

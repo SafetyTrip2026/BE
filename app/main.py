@@ -93,12 +93,13 @@ def generate_sse_stream(user_query: str):
         return
 
     # 2) 파싱 실패 -> 재질문 요청
-    # (reactive 질문은 region_sido 없어도 정상이라, prevention일 때만 지역 필수로 체크)
+    # (reactive 질문은 region_sido/disaster_type 없어도 정상 진행 - 그래프의
+    #  route_after_parse와 동일한 기준. disaster_type 없어도 원본 질문으로
+    #  검색하는 폴백 경로가 retrieve_node에 있음)
     intent = result_state.get("intent")
     is_unrecoverable = (
         result_state.get("parse_failed")
         or (intent == "prevention" and not result_state.get("region_sido"))
-        or (intent == "reactive" and not result_state.get("disaster_type"))
         or intent not in ("prevention", "reactive")
     )
     if is_unrecoverable:
