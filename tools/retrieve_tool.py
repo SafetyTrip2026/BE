@@ -14,6 +14,8 @@ import requests
 import psycopg2
 from dotenv import load_dotenv
 
+from tools.resilience import call_with_retry
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -21,35 +23,72 @@ UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")
 EMBEDDING_URL = "https://api.upstage.ai/v1/solar/embeddings"
 QUERY_MODEL = "solar-embedding-1-large-query"
 
+# 429(속도제한)/5xx(서버오류)/타임아웃/연결오류만 재시도 대상 (400 등 요청 자체 오류는 재시도 무의미)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-def embed_query(text: str) -> list:
+
+class _RetryableHTTPStatus(Exception):
+    pass
+
+
+def _embed_query_once(text: str) -> list:
     headers = {"Authorization": f"Bearer {UPSTAGE_API_KEY}", "Content-Type": "application/json"}
     resp = requests.post(EMBEDDING_URL, headers=headers,
-                        json={"input": text, "model": QUERY_MODEL}, timeout=30)
+                        json={"input": text, "model": QUERY_MODEL}, timeout=15)  # ① timeout
+    if resp.status_code in _RETRYABLE_STATUS:
+        raise _RetryableHTTPStatus(f"status={resp.status_code}")
     resp.raise_for_status()
     return resp.json()["data"][0]["embedding"]
+
+
+def embed_query(text: str) -> list:
+    """② 재시도(타임아웃/연결오류/429/5xx만) ③ 그래도 실패하면 ToolUnavailableError"""
+    return call_with_retry(
+        _embed_query_once, text,
+        retryable_exceptions=(
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            _RetryableHTTPStatus,
+        ),
+        tool_name="embed_query(Solar Embedding)",
+    )
+
+
+def _query_db_once(embedding_str: str, top_k: int) -> list:
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)  # ① timeout
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, content, safety_cate_nm1, safety_cate_nm2, safety_cate_nm3,
+                   source_dataset, embedding <=> %s::vector AS distance
+            FROM disaster_guidelines
+            ORDER BY distance ASC
+            LIMIT %s
+        """, (embedding_str, top_k))
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+    finally:
+        conn.close()
 
 
 def retrieve_guidelines(query: str, top_k: int = 5):
     """
     질문과 코사인 거리가 가까운 행동요령 top_k개를 반환.
     인덱스 없이 순차 스캔(현재 데이터 규모에서는 충분히 빠름).
+
+    임베딩 API 또는 DB 호출이 재시도까지 다 실패하면 ToolUnavailableError가
+    발생함 - 호출부(retrieve_node)가 이를 잡아서 빈 리스트로 처리하고,
+    게이트가 자동으로 에스컬레이션하도록 우아하게 강등시킴.
     """
     query_embedding = embed_query(query)
     embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, content, safety_cate_nm1, safety_cate_nm2, safety_cate_nm3,
-               source_dataset, embedding <=> %s::vector AS distance
-        FROM disaster_guidelines
-        ORDER BY distance ASC
-        LIMIT %s
-    """, (embedding_str, top_k))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    rows = call_with_retry(
+        _query_db_once, embedding_str, top_k,
+        retryable_exceptions=(psycopg2.OperationalError,),
+        tool_name="retrieve_guidelines(DB)",
+    )
 
     results = []
     for r in rows:

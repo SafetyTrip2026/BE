@@ -7,6 +7,7 @@ llm_client.build_respond_prompt + stream_response로 처리함.
 """
 import sys
 import os
+import logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -14,7 +15,10 @@ from app.graph.state import AgentState
 from app.llm_client import parse_user_query, judge_relevance
 from tools.stats_tool import get_disaster_stats
 from tools.retrieve_tool import retrieve_guidelines
+from tools.resilience import ToolUnavailableError
 from preprocessors.disaster_type_phone_map import get_contact
+
+logger = logging.getLogger("app.graph.nodes")
 
 # 1차 게이트 임계값: 검색된 행동요령 중 가장 가까운 거리가 이보다 크면
 # "관련 근거 없음"으로 판단 (코사인 거리, 작을수록 유사)
@@ -98,7 +102,19 @@ def retrieve_node(state: AgentState) -> dict:
             disaster_type을 못 뽑았어도(파싱이 완벽하지 않을 수 있음) 재질문으로
             바로 안 보내고, 원본 질문 그대로 벡터 검색하는 폴백 경로(맨 아래 else)를 씀
             - 원본 문장 자체가 이미 구체적 상황 설명을 담고 있어 검색에 충분한 경우가 많음.
+
+    임베딩 API/DB가 재시도까지 다 실패하면(ToolUnavailableError) 빈 리스트로
+    우아하게 강등함. gate_node가 "검색결과 없음" -> distance=999(기본값)로 처리해서
+    자동으로 에스컬레이션되므로, 별도 예외처리 로직을 여기서 새로 안 만들어도 됨.
     """
+    try:
+        return _retrieve_node_inner(state)
+    except ToolUnavailableError as e:
+        logger.warning(f"retrieve_node 도구 호출 실패, 빈 결과로 강등 처리: {e}")
+        return {"retrieved_guidelines": []}
+
+
+def _retrieve_node_inner(state: AgentState) -> dict:
     intent = state.get("intent")
     has_vulnerable = state.get("has_vulnerable", False)
     vulnerable_note = " 노약자 동반 시 주의사항 포함" if has_vulnerable else ""
